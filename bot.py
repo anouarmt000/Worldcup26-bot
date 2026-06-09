@@ -22,7 +22,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ─── Bot Token ─────────────────────────────────────────────────────────────────
-TOKEN = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
+TOKEN = os.environ.get("BOT_TOKEN", "8817733030:AAHAIqTCQwJ-qoyN8cdn-LXSl9hBslXCCow")
 
 # ─── World Cup 2026 Data ───────────────────────────────────────────────────────
 
