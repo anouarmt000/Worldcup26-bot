@@ -1,488 +1,494 @@
 #!/usr/bin/env python3
 """
-⚽ World Cup 2026 Bot - بوت كأس العالم 2026
-Professional Bilingual Arabic/English Telegram Bot
-Version 2.0 - Full Edition
+⚽ World Cup 2026 Pro Bot
+Version 3.0 — Professional Edition
+• Live data from API-Football (api-sports.io)
+• Built-in subscriber management system
+• Admin broadcast panel
+• Tactical analysis & advanced stats
+• Bilingual AR/EN
 """
 
-import os
-import logging
-import random
-from datetime import date, timedelta
+import os, logging, random, json, asyncio, aiohttp
+from datetime import date, timedelta, datetime
 from dotenv import load_dotenv
 
 load_dotenv()
-TOKEN = os.environ.get("BOT_TOKEN")
+TOKEN        = os.environ.get("BOT_TOKEN")
+FOOTBALL_API = os.environ.get("FOOTBALL_API_KEY", "")   # api-sports.io key
+ADMIN_ID     = int(os.environ.get("ADMIN_ID", "0"))      # your Telegram numeric ID
 
 if not TOKEN:
-    raise ValueError("❌ BOT_TOKEN غير موجود! أضفه في Railway Variables")
+    raise ValueError("❌ BOT_TOKEN غير موجود في Railway Variables")
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
-    ContextTypes, MessageHandler, filters
+    ContextTypes, MessageHandler, ConversationHandler, filters
 )
 
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO
-)
+logging.basicConfig(format="%(asctime)s | %(levelname)s | %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ═══════════════════════════════════════════════════════
-#  DATA — GROUPS
-# ═══════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════
+#  SUBSCRIBER DATABASE  (JSON file — simple & reliable)
+# ═══════════════════════════════════════════════════════════════════
+
+DB_FILE = "subscribers.json"
+
+def load_db() -> dict:
+    if os.path.exists(DB_FILE):
+        with open(DB_FILE, "r") as f:
+            return json.load(f)
+    return {"users": {}}
+
+def save_db(db: dict):
+    with open(DB_FILE, "w") as f:
+        json.dump(db, f, ensure_ascii=False, indent=2)
+
+def register_user(user):
+    db = load_db()
+    uid = str(user.id)
+    if uid not in db["users"]:
+        db["users"][uid] = {
+            "id": user.id,
+            "name": user.first_name or "",
+            "username": user.username or "",
+            "lang": "ar",
+            "joined": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "active": True
+        }
+        save_db(db)
+        logger.info(f"New subscriber: {user.first_name} ({user.id})")
+    return db["users"][uid]
+
+def update_user_lang(uid: int, lang: str):
+    db = load_db()
+    if str(uid) in db["users"]:
+        db["users"][str(uid)]["lang"] = lang
+        save_db(db)
+
+def get_all_subscribers() -> list:
+    db = load_db()
+    return [v for v in db["users"].values() if v.get("active", True)]
+
+def get_subscriber_count() -> int:
+    return len(get_all_subscribers())
+
+# ═══════════════════════════════════════════════════════════════════
+#  LIVE API — api-sports.io (free tier: 100 req/day)
+# ═══════════════════════════════════════════════════════════════════
+
+API_BASE = "https://v3.football.api-sports.io"
+WC2026_ID = 1 # Will be updated once WC 2026 has official ID
+
+async def api_get(endpoint: str, params: dict = {}) -> dict | None:
+    if not FOOTBALL_API:
+        return None
+    headers = {"x-apisports-key": FOOTBALL_API}
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"{API_BASE}/{endpoint}", headers=headers, params=params, timeout=aiohttp.ClientTimeout(total=8)) as r:
+                if r.status == 200:
+                    return await r.json()
+    except Exception as e:
+        logger.warning(f"API error: {e}")
+    return None
+
+async def fetch_live_matches() -> list:
+    data = await api_get("fixtures", {"live": "all"})
+    if not data or not data.get("response"):
+        return []
+    matches = []
+    for f in data["response"][:8]:
+        fix = f["fixture"]
+        teams = f["teams"]
+        goals = f["goals"]
+        matches.append({
+            "home": teams["home"]["name"],
+            "away": teams["away"]["name"],
+            "home_goal": goals["home"] if goals["home"] is not None else "-",
+            "away_goal": goals["away"] if goals["away"] is not None else "-",
+            "status": fix["status"]["long"],
+            "minute": fix["status"].get("elapsed", ""),
+            "venue": fix["venue"]["name"] or "N/A",
+        })
+    return matches
+
+async def fetch_standings(league_id: int, season: int) -> str:
+    data = await api_get("standings", {"league": league_id, "season": season})
+    if not data or not data.get("response"):
+        return None
+    try:
+        standings = data["response"][0]["league"]["standings"][0]
+        lines = []
+        for t in standings[:10]:
+            lines.append(
+                f"{t['rank']}. {t['team']['name']} — "
+                f"*{t['points']} pts* | "
+                f"W{t['all']['win']} D{t['all']['draw']} L{t['all']['lose']}"
+            )
+        return "\n".join(lines)
+    except:
+        return None
+
+async def fetch_team_stats(team_id: int, league_id: int, season: int) -> str:
+    data = await api_get("teams/statistics", {"team": team_id, "league": league_id, "season": season})
+    if not data or not data.get("response"):
+        return None
+    try:
+        s = data["response"]
+        name = s["team"]["name"]
+        form = s.get("form", "N/A")
+        goals_for = s["goals"]["for"]["total"]["total"]
+        goals_ag  = s["goals"]["against"]["total"]["total"]
+        biggest_win = s["biggest"].get("wins", {}).get("away", "N/A")
+        return (
+            f"📊 *{name} — Season Stats*\n\n"
+            f"📈 Form (last 5): `{form[-5:]}`\n"
+            f"⚽ Goals scored: *{goals_for}*\n"
+            f"🛡 Goals conceded: *{goals_ag}*\n"
+            f"🏆 Biggest win: *{biggest_win}*"
+        )
+    except:
+        return None
+
+# ═══════════════════════════════════════════════════════════════════
+#  STATIC DATA
+# ═══════════════════════════════════════════════════════════════════
 
 GROUPS = {
-    "A": {"teams": ["🇲🇽 المكسيك / Mexico", "🇿🇦 جنوب أفريقيا / South Africa", "🇰🇷 كوريا الجنوبية / South Korea", "🇨🇿 التشيك / Czechia"]},
-    "B": {"teams": ["🇨🇦 كندا / Canada", "🇧🇦 البوسنة / Bosnia", "🇶🇦 قطر / Qatar", "🇨🇭 سويسرا / Switzerland"]},
-    "C": {"teams": ["🇺🇸 أمريكا / USA", "🇵🇾 باراغواي / Paraguay", "🇸🇪 السويد / Sweden", "🇹🇳 تونس / Tunisia"]},
-    "D": {"teams": ["🇩🇪 ألمانيا / Germany", "🇨🇼 كوراساو / Curaçao", "🇳🇱 هولندا / Netherlands", "🇯🇵 اليابان / Japan"]},
-    "E": {"teams": ["🇪🇸 إسبانيا / Spain", "🇧🇪 بلجيكا / Belgium", "🇸🇦 السعودية / Saudi Arabia", "🇮🇷 إيران / Iran"]},
-    "F": {"teams": ["🇫🇷 فرنسا / France", "🇸🇳 السنغال / Senegal", "🇮🇶 العراق / Iraq", "🇳🇴 النرويج / Norway"]},
-    "G": {"teams": ["🇧🇷 البرازيل / Brazil", "🇲🇦 المغرب / Morocco", "🇭🇹 هايتي / Haiti", "🇦🇺 أستراليا / Australia"]},
-    "H": {"teams": ["🇵🇹 البرتغال / Portugal", "🇨🇴 كولومبيا / Colombia", "🇺🇿 أوزبكستان / Uzbekistan", "🇨🇩 الكونغو / DR Congo"]},
-    "I": {"teams": ["🇦🇷 الأرجنتين / Argentina", "🇦🇹 النمسا / Austria", "🇩🇿 الجزائر / Algeria", "🇯🇴 الأردن / Jordan"]},
-    "J": {"teams": ["🏴󠁧󠁢󠁥󠁮󠁧󠁿 إنجلترا / England", "🇭🇷 كرواتيا / Croatia", "🇵🇦 بنما / Panama", "🇬🇭 غانا / Ghana"]},
-    "K": {"teams": ["🇮🇹 إيطاليا / Italy", "🇪🇨 الإكوادور / Ecuador", "🇨🇮 ساحل العاج / Ivory Coast", "🇹🇷 تركيا / Turkey"]},
-    "L": {"teams": ["🇺🇾 أوروغواي / Uruguay", "🇨🇻 الرأس الخضراء / Cape Verde", "🇯🇲 جامايكا / Jamaica", "🇨🇱 تشيلي / Chile"]},
+    "A": ["🇲🇽 Mexico", "🇿🇦 South Africa", "🇰🇷 South Korea", "🇨🇿 Czechia"],
+    "B": ["🇨🇦 Canada", "🇧🇦 Bosnia", "🇶🇦 Qatar", "🇨🇭 Switzerland"],
+    "C": ["🇺🇸 USA", "🇵🇾 Paraguay", "🇸🇪 Sweden", "🇹🇳 Tunisia"],
+    "D": ["🇩🇪 Germany", "🇨🇼 Curaçao", "🇳🇱 Netherlands", "🇯🇵 Japan"],
+    "E": ["🇪🇸 Spain", "🇧🇪 Belgium", "🇸🇦 Saudi Arabia", "🇮🇷 Iran"],
+    "F": ["🇫🇷 France", "🇸🇳 Senegal", "🇮🇶 Iraq", "🇳🇴 Norway"],
+    "G": ["🇧🇷 Brazil", "🇲🇦 Morocco", "🇭🇹 Haiti", "🇦🇺 Australia"],
+    "H": ["🇵🇹 Portugal", "🇨🇴 Colombia", "🇺🇿 Uzbekistan", "🇨🇩 DR Congo"],
+    "I": ["🇦🇷 Argentina", "🇦🇹 Austria", "🇩🇿 Algeria", "🇯🇴 Jordan"],
+    "J": ["🏴󠁧󠁢󠁥󠁮󠁧󠁿 England", "🇭🇷 Croatia", "🇵🇦 Panama", "🇬🇭 Ghana"],
+    "K": ["🇮🇹 Italy", "🇪🇨 Ecuador", "🇨🇮 Ivory Coast", "🇹🇷 Turkey"],
+    "L": ["🇺🇾 Uruguay", "🇨🇻 Cape Verde", "🇯🇲 Jamaica", "🇨🇱 Chile"],
 }
-
-# ═══════════════════════════════════════════════════════
-#  DATA — MATCHES
-# ═══════════════════════════════════════════════════════
 
 MATCHES_BY_DATE = {
-    "2026-06-11": [
-        {"home": "🇲🇽 Mexico", "away": "🇿🇦 South Africa", "time": "22:00", "group": "A", "stadium": "Estadio Azteca 🏟️", "city": "Mexico City"},
-    ],
+    "2026-06-11": [{"home":"🇲🇽 Mexico","away":"🇿🇦 South Africa","time":"22:00","group":"A","stadium":"Estadio Azteca","city":"Mexico City"}],
     "2026-06-12": [
-        {"home": "🇨🇦 Canada", "away": "🇧🇦 Bosnia", "time": "20:00", "group": "B", "stadium": "BMO Field 🏟️", "city": "Toronto"},
-        {"home": "🇰🇷 South Korea", "away": "🇨🇿 Czechia", "time": "23:00", "group": "A", "stadium": "Estadio Akron 🏟️", "city": "Guadalajara"},
+        {"home":"🇨🇦 Canada","away":"🇧🇦 Bosnia","time":"20:00","group":"B","stadium":"BMO Field","city":"Toronto"},
+        {"home":"🇰🇷 South Korea","away":"🇨🇿 Czechia","time":"23:00","group":"A","stadium":"Estadio Akron","city":"Guadalajara"},
     ],
     "2026-06-13": [
-        {"home": "🇺🇸 USA", "away": "🇵🇾 Paraguay", "time": "02:00", "group": "C", "stadium": "SoFi Stadium 🏟️", "city": "Los Angeles"},
-        {"home": "🇶🇦 Qatar", "away": "🇨🇭 Switzerland", "time": "20:00", "group": "B", "stadium": "Levi's Stadium 🏟️", "city": "San Francisco"},
-        {"home": "🇧🇷 Brazil", "away": "🇲🇦 Morocco", "time": "23:00", "group": "G", "stadium": "SoFi Stadium 🏟️", "city": "Los Angeles"},
+        {"home":"🇺🇸 USA","away":"🇵🇾 Paraguay","time":"02:00","group":"C","stadium":"SoFi Stadium","city":"Los Angeles"},
+        {"home":"🇶🇦 Qatar","away":"🇨🇭 Switzerland","time":"20:00","group":"B","stadium":"Levi's Stadium","city":"San Francisco"},
+        {"home":"🇧🇷 Brazil","away":"🇲🇦 Morocco","time":"23:00","group":"G","stadium":"SoFi Stadium","city":"Los Angeles"},
     ],
     "2026-06-14": [
-        {"home": "🇭🇹 Haiti", "away": "🇦🇺 Australia", "time": "02:00", "group": "G", "stadium": "AT&T Stadium 🏟️", "city": "Dallas"},
-        {"home": "🇩🇪 Germany", "away": "🇨🇼 Curaçao", "time": "18:00", "group": "D", "stadium": "Mercedes-Benz Stadium 🏟️", "city": "Atlanta"},
-        {"home": "🇳🇱 Netherlands", "away": "🇯🇵 Japan", "time": "21:00", "group": "D", "stadium": "Gillette Stadium 🏟️", "city": "Boston"},
-        {"home": "🇸🇦 Saudi Arabia", "away": "🇮🇷 Iran", "time": "23:00", "group": "E", "stadium": "Arrowhead Stadium 🏟️", "city": "Kansas City"},
+        {"home":"🇩🇪 Germany","away":"🇨🇼 Curaçao","time":"18:00","group":"D","stadium":"Mercedes-Benz Stadium","city":"Atlanta"},
+        {"home":"🇳🇱 Netherlands","away":"🇯🇵 Japan","time":"21:00","group":"D","stadium":"Gillette Stadium","city":"Boston"},
+        {"home":"🇸🇦 Saudi Arabia","away":"🇮🇷 Iran","time":"23:00","group":"E","stadium":"Arrowhead Stadium","city":"Kansas City"},
     ],
     "2026-06-15": [
-        {"home": "🇪🇸 Spain", "away": "🇨🇻 Cape Verde", "time": "17:00", "group": "E", "stadium": "Rose Bowl 🏟️", "city": "Los Angeles"},
-        {"home": "🇧🇪 Belgium", "away": "🇪🇬 Egypt", "time": "20:00", "group": "E", "stadium": "Hard Rock Stadium 🏟️", "city": "Miami"},
-        {"home": "🇩🇿 Algeria", "away": "🇯🇴 Jordan", "time": "23:00", "group": "I", "stadium": "MetLife Stadium 🏟️", "city": "New York"},
+        {"home":"🇪🇸 Spain","away":"🇨🇻 Cape Verde","time":"17:00","group":"E","stadium":"Rose Bowl","city":"Los Angeles"},
+        {"home":"🇧🇪 Belgium","away":"🇪🇬 Egypt","time":"20:00","group":"E","stadium":"Hard Rock Stadium","city":"Miami"},
+        {"home":"🇩🇿 Algeria","away":"🇯🇴 Jordan","time":"23:00","group":"I","stadium":"MetLife Stadium","city":"New York"},
     ],
     "2026-06-16": [
-        {"home": "🇫🇷 France", "away": "🇸🇳 Senegal", "time": "20:00", "group": "F", "stadium": "SoFi Stadium 🏟️", "city": "Los Angeles"},
-        {"home": "🇮🇶 Iraq", "away": "🇳🇴 Norway", "time": "23:00", "group": "F", "stadium": "Lumen Field 🏟️", "city": "Seattle"},
-        {"home": "🇦🇷 Argentina", "away": "🇦🇹 Austria", "time": "02:00", "group": "I", "stadium": "MetLife Stadium 🏟️", "city": "New York"},
+        {"home":"🇫🇷 France","away":"🇸🇳 Senegal","time":"20:00","group":"F","stadium":"SoFi Stadium","city":"Los Angeles"},
+        {"home":"🇮🇶 Iraq","away":"🇳🇴 Norway","time":"23:00","group":"F","stadium":"Lumen Field","city":"Seattle"},
+        {"home":"🇦🇷 Argentina","away":"🇦🇹 Austria","time":"02:00","group":"I","stadium":"MetLife Stadium","city":"New York"},
     ],
     "2026-06-17": [
-        {"home": "🏴󠁧󠁢󠁥󠁮󠁧󠁿 England", "away": "🇭🇷 Croatia", "time": "20:00", "group": "J", "stadium": "AT&T Stadium 🏟️", "city": "Dallas"},
-        {"home": "🇵🇹 Portugal", "away": "🇨🇴 Colombia", "time": "23:00", "group": "H", "stadium": "Allegiant Stadium 🏟️", "city": "Las Vegas"},
+        {"home":"🏴󠁧󠁢󠁥󠁮󠁧󠁿 England","away":"🇭🇷 Croatia","time":"20:00","group":"J","stadium":"AT&T Stadium","city":"Dallas"},
+        {"home":"🇵🇹 Portugal","away":"🇨🇴 Colombia","time":"23:00","group":"H","stadium":"Allegiant Stadium","city":"Las Vegas"},
     ],
     "2026-06-18": [
-        {"home": "🇮🇹 Italy", "away": "🇪🇨 Ecuador", "time": "20:00", "group": "K", "stadium": "Lincoln Financial Field 🏟️", "city": "Philadelphia"},
-        {"home": "🇺🇾 Uruguay", "away": "🇨🇻 Cape Verde", "time": "23:00", "group": "L", "stadium": "NRG Stadium 🏟️", "city": "Houston"},
+        {"home":"🇮🇹 Italy","away":"🇪🇨 Ecuador","time":"20:00","group":"K","stadium":"Lincoln Financial Field","city":"Philadelphia"},
+        {"home":"🇺🇾 Uruguay","away":"🇨🇻 Cape Verde","time":"23:00","group":"L","stadium":"NRG Stadium","city":"Houston"},
     ],
 }
 
-# ═══════════════════════════════════════════════════════
-#  DATA — PREDICTIONS
-# ═══════════════════════════════════════════════════════
-
-PREDICTIONS = {
-    "🇲🇽 Mexico vs 🇿🇦 South Africa": {
+TACTICAL_ANALYSIS = {
+    "🇲🇽 Mexico": {
         "ar": (
-            "🔮 *تحليل المباراة*\n\n"
-            "🏟️ *الملعب:* أزتيكا — الأكثر سحراً في تاريخ كأس العالم\n"
-            "📊 *التوقع:* المكسيك 2-0 جنوب أفريقيا\n\n"
-            "💪 *نقاط قوة المكسيك:*\n"
-            "• الجمهور المنزلي يرفع مستواهم بشكل استثنائي\n"
-            "• هجوم سريع ومنظم على الأجنحة\n"
-            "• خبرة كبيرة في مباريات الافتتاح\n\n"
-            "⚠️ *خطر جنوب أفريقيا:*\n"
-            "• دفاع منظم وصعب الاختراق\n"
-            "• يلعبون بلا ضغط — أي هدف سيكون مفاجأة\n\n"
-            "🎯 *نصيحة المراهنة:* المكسيك تسجل أولاً — احتمال 75%"
+            "🧠 *تحليل تكتيكي — المكسيك*\n\n"
+            "📐 *التشكيلة المعتادة:* 4-3-3\n\n"
+            "⚙️ *أسلوب اللعب:*\n"
+            "• ضغط عالٍ في ملعب الخصم (Gegenpressing)\n"
+            "• انتقال سريع من الدفاع للهجوم في 3-4 تمريرات\n"
+            "• الاعتماد على الأجنحة السريعة للتمركز خلف الدفاع\n\n"
+            "🔑 *اللاعبون المحوريون:*\n"
+            "• رائول خيمينيز — مرجع الهجوم\n"
+            "• إيرفينج لوزانو — السرعة على اليمين\n"
+            "• إيداير مورالس — قلب الوسط\n\n"
+            "⚠️ *نقاط الضعف:*\n"
+            "• الدفاع يتعرض للضغط أمام الكرات الثابتة\n"
+            "• يفقد التنظيم أمام الضغط العالي"
         ),
         "en": (
-            "🔮 *Match Analysis*\n\n"
-            "🏟️ *Venue:* Azteca — the most iconic WC stadium ever\n"
-            "📊 *Prediction:* Mexico 2-0 South Africa\n\n"
-            "💪 *Mexico strengths:*\n"
-            "• Home crowd gives massive boost\n"
-            "• Fast, organized wing play\n"
-            "• Big opening match experience\n\n"
-            "⚠️ *South Africa threat:*\n"
-            "• Organized, hard-to-break defense\n"
-            "• Nothing to lose mentality\n\n"
-            "🎯 *Tip:* Mexico to score first — 75% probability"
+            "🧠 *Tactical Analysis — Mexico*\n\n"
+            "📐 *Formation:* 4-3-3\n\n"
+            "⚙️ *Playing Style:*\n"
+            "• High pressing (Gegenpressing)\n"
+            "• Fast transition — 3-4 pass counter-attacks\n"
+            "• Wide wingers making runs in behind\n\n"
+            "🔑 *Key Players:*\n"
+            "• Raúl Jiménez — target man\n"
+            "• Hirving Lozano — pace on the right\n"
+            "• Edson Álvarez — midfield anchor\n\n"
+            "⚠️ *Weaknesses:*\n"
+            "• Vulnerable to set pieces\n"
+            "• Loses shape under high press"
         ),
     },
-    "🇧🇷 Brazil vs 🇲🇦 Morocco": {
+    "🇫🇷 France": {
         "ar": (
-            "🔮 *تحليل المباراة*\n\n"
-            "📊 *التوقع:* البرازيل 2-1 المغرب\n\n"
-            "💪 *نقاط قوة البرازيل:*\n"
-            "• فينيسيوس جونيور — الأفضل في العالم حالياً\n"
-            "• رودريغو وأندريك — جيل ذهبي جديد\n"
-            "• إبداع فردي لا مثيل له\n\n"
-            "⚠️ *خطر المغرب:*\n"
-            "• أسد أطلس 2022 كانت الإحساس الحقيقي!\n"
-            "• دفاع مدرب على أعلى مستوى\n"
-            "• ملايين من الجمهور العربي يدعمهم\n\n"
-            "🎯 *نصيحة:* مباراة مفتوحة — توقع أهدافاً في الشوطين"
+            "🧠 *تحليل تكتيكي — فرنسا*\n\n"
+            "📐 *التشكيلة:* 4-2-3-1\n\n"
+            "⚙️ *أسلوب اللعب:*\n"
+            "• دفاع منظم وعميق ثم انتقال متفجر\n"
+            "• مبابي على الجناح الأيسر يمنح عمقاً تهديدياً دائماً\n"
+            "• جريزمان يتراجع ليصنع الفرص كـ False 9\n"
+            "• تشيامني وكانتي يؤمنان المحور\n\n"
+            "🔑 *اللاعبون المحوريون:*\n"
+            "• مبابي — سرعة مطلقة وإنهاء قاتل\n"
+            "• جريزمان — رؤية استثنائية وإبداع\n"
+            "• ديمبيلي — مراوغة وتمريرات حاسمة\n\n"
+            "⚠️ *نقاط الضعف:*\n"
+            "• الاعتماد الزائد على مبابي\n"
+            "• تراجع الأداء أمام الضغط الجماعي العالي"
         ),
         "en": (
-            "🔮 *Match Analysis*\n\n"
-            "📊 *Prediction:* Brazil 2-1 Morocco\n\n"
-            "💪 *Brazil strengths:*\n"
-            "• Vinicius Jr — arguably world's best right now\n"
-            "• Rodrygo & Endrick — golden new generation\n"
-            "• Unmatched individual brilliance\n\n"
-            "⚠️ *Morocco threat:*\n"
-            "• 2022 semifinalists — no team to underestimate!\n"
-            "• World-class defensive organization\n"
-            "• Massive Arab world support\n\n"
-            "🎯 *Tip:* Open game — expect goals in both halves"
+            "🧠 *Tactical Analysis — France*\n\n"
+            "📐 *Formation:* 4-2-3-1\n\n"
+            "⚙️ *Playing Style:*\n"
+            "• Deep defensive block + explosive counter\n"
+            "• Mbappe on left provides constant depth threat\n"
+            "• Griezmann drops as False 9 to create\n"
+            "• Tchouameni & Kante secure the midfield\n\n"
+            "🔑 *Key Players:*\n"
+            "• Mbappe — pace & lethal finishing\n"
+            "• Griezmann — vision and creativity\n"
+            "• Dembele — dribbling & key passes\n\n"
+            "⚠️ *Weaknesses:*\n"
+            "• Over-reliance on Mbappe\n"
+            "• Can struggle vs high collective pressing"
         ),
     },
-    "🇫🇷 France vs 🇸🇳 Senegal": {
+    "🇦🇷 Argentina": {
         "ar": (
-            "🔮 *تحليل المباراة*\n\n"
-            "📊 *التوقع:* فرنسا 2-1 السنغال\n\n"
-            "💪 *نقاط قوة فرنسا:*\n"
-            "• مبابي — الأسرع والأخطر في كرة القدم\n"
-            "• جريزمان — عقل المنتخب الفرنسي\n"
-            "• عمق هجومي لا نهاية له\n\n"
-            "⚠️ *خطر السنغال:*\n"
-            "• ساديو مانيه — بطل أفريقيا\n"
-            "• روح جماعية استثنائية\n"
-            "• انتصر على فرنسا من قبل!\n\n"
-            "🎯 *نصيحة:* فرنسا مرشحة للقب — لكن السنغال ستقاوم بشراسة"
+            "🧠 *تحليل تكتيكي — الأرجنتين*\n\n"
+            "📐 *التشكيلة:* 4-4-2 / 4-3-3\n\n"
+            "⚙️ *أسلوب اللعب:*\n"
+            "• ضغط جماعي بلا كلل (Scaloni Press)\n"
+            "• تحرك ميسي الحر يخلق تفوقاً عددياً في الوسط\n"
+            "• الجانبان ألفاريز ودي باول يقطعان المسافات بسرعة\n"
+            "• قوة نفسية استثنائية بعد 2022\n\n"
+            "🔑 *اللاعبون المحوريون:*\n"
+            "• ميسي — يصنع ويسجل من أي موقع\n"
+            "• ألفاريز — حركة بلا توقف في المنطقة\n"
+            "• دي باول — رئة الفريق في الوسط\n\n"
+            "⚠️ *نقاط الضعف:*\n"
+            "• إذا أُوقف ميسي تراجع التهديد\n"
+            "• قد يعاني ضد الفرق التي تلعب بـ 5 مدافعين"
         ),
         "en": (
-            "🔮 *Match Analysis*\n\n"
-            "📊 *Prediction:* France 2-1 Senegal\n\n"
-            "💪 *France strengths:*\n"
-            "• Mbappe — fastest and most dangerous in football\n"
-            "• Griezmann — the brain of Les Bleus\n"
-            "• Endless attacking depth\n\n"
-            "⚠️ *Senegal threat:*\n"
-            "• Sadio Mane — African champion\n"
-            "• Exceptional team spirit\n"
-            "• Have beaten France before!\n\n"
-            "🎯 *Tip:* France are title favorites — but Senegal will fight hard"
+            "🧠 *Tactical Analysis — Argentina*\n\n"
+            "📐 *Formation:* 4-4-2 / 4-3-3\n\n"
+            "⚙️ *Playing Style:*\n"
+            "• Relentless collective pressing (Scaloni Press)\n"
+            "• Messi's free role creates midfield overloads\n"
+            "• Alvarez & De Paul cover ground rapidly\n"
+            "• Exceptional mental strength post-2022\n\n"
+            "🔑 *Key Players:*\n"
+            "• Messi — creates and scores from anywhere\n"
+            "• Alvarez — relentless movement in the box\n"
+            "• De Paul — the engine in midfield\n\n"
+            "⚠️ *Weaknesses:*\n"
+            "• If Messi is neutralized, threat drops sharply\n"
+            "• Can struggle vs 5-back defensive setups"
         ),
     },
-    "🇦🇷 Argentina vs 🇦🇹 Austria": {
+    "🇧🇷 Brazil": {
         "ar": (
-            "🔮 *تحليل المباراة*\n\n"
-            "📊 *التوقع:* الأرجنتين 3-0 النمسا\n\n"
-            "💪 *نقاط قوة الأرجنتين:*\n"
-            "• ليونيل ميسي — آخر رقصة في المونديال؟\n"
-            "• ألفاريز ودي باول — ثنائي فتاك\n"
-            "• حاملة اللقب وتريد الدفاع عنه بقوة\n\n"
-            "⚠️ *ملاحظة على النمسا:*\n"
-            "• رانيك بنى فريقاً منظماً ومجتهداً\n"
-            "• لكن الفجوة في الموهبة كبيرة جداً\n\n"
-            "🎯 *نصيحة:* ميسي يريد التاريخ — توقع عرضاً استثنائياً"
+            "🧠 *تحليل تكتيكي — البرازيل*\n\n"
+            "📐 *التشكيلة:* 4-2-3-1\n\n"
+            "⚙️ *أسلوب اللعب:*\n"
+            "• كرة ارتكاز مع انتقالات سريعة على الأجنحة\n"
+            "• فينيسيوس يلعب على اليسار بحرية مطلقة\n"
+            "• رودريغو يغطي المساحات خلف المهاجم\n"
+            "• كاسيميرو يؤمن العمق الدفاعي\n\n"
+            "🔑 *اللاعبون المحوريون:*\n"
+            "• فينيسيوس جونيور — الأخطر في العالم\n"
+            "• رودريغو — حركة ذكية وأهداف كبيرة\n"
+            "• أندريك — المستقبل يبدأ الآن\n\n"
+            "⚠️ *نقاط الضعف:*\n"
+            "• الدفاع يفتقر للصلابة أمام الكرات العرضية\n"
+            "• يعاني نفسياً أحياناً في المباريات الكبيرة"
         ),
         "en": (
-            "🔮 *Match Analysis*\n\n"
-            "📊 *Prediction:* Argentina 3-0 Austria\n\n"
-            "💪 *Argentina strengths:*\n"
-            "• Lionel Messi — his last World Cup dance?\n"
-            "• Alvarez & De Paul — lethal partnership\n"
-            "• Defending champions with a point to prove\n\n"
-            "⚠️ *Austria note:*\n"
-            "• Rangnick built an organized, hardworking side\n"
-            "• But the talent gap is simply too large\n\n"
-            "🎯 *Tip:* Messi wants history — expect a masterclass"
+            "🧠 *Tactical Analysis — Brazil*\n\n"
+            "📐 *Formation:* 4-2-3-1\n\n"
+            "⚙️ *Playing Style:*\n"
+            "• Possession-based with explosive wing transitions\n"
+            "• Vinicius given total freedom on the left\n"
+            "• Rodrygo covers spaces behind the striker\n"
+            "• Casemiro provides defensive cover\n\n"
+            "🔑 *Key Players:*\n"
+            "• Vinicius Jr — most dangerous player in world\n"
+            "• Rodrygo — intelligent movement & big goals\n"
+            "• Endrick — the future starts now\n\n"
+            "⚠️ *Weaknesses:*\n"
+            "• Defense lacks aerial strength\n"
+            "• Can underperform mentally in big moments"
         ),
     },
-    "🇩🇿 Algeria vs 🇯🇴 Jordan": {
+    "🇩🇿 Algeria": {
         "ar": (
-            "🔮 *تحليل المباراة*\n\n"
-            "📊 *التوقع:* الجزائر 2-0 الأردن\n\n"
-            "💪 *نقاط قوة الجزائر:*\n"
-            "• محرز — تجربة استثنائية في أكبر البطولات\n"
-            "• مباراة عربية بامتياز — حماس الجمهور هائل\n"
-            "• قوة جسدية وسرعة في الانتقال\n\n"
-            "⚠️ *خطر الأردن:*\n"
-            "• مفاجأة سارة بالتأهل لأول كأس عالم!\n"
-            "• روح قتالية لا تُقهر\n"
-            "• أي نقطة ستكون إنجازاً تاريخياً\n\n"
-            "🎯 *نصيحة:* الجزائر المرشح الأقوى — لكن الأردن سيكافح بشرف"
+            "🧠 *تحليل تكتيكي — الجزائر*\n\n"
+            "📐 *التشكيلة:* 4-3-3 / 4-2-3-1\n\n"
+            "⚙️ *أسلوب اللعب:*\n"
+            "• ضغط متوسط وانتقال سريع للهجوم\n"
+            "• محرز يلعب بحرية خلف المهاجمين\n"
+            "• الاعتماد على الكرات الثابتة والضربات الحرة\n"
+            "• دفاع مركزي قوي وصعب الاختراق\n\n"
+            "🔑 *اللاعبون المحوريون:*\n"
+            "• رياض محرز — أفضل لاعب عربي في التاريخ\n"
+            "• بغداد بونجاح — مرجع الهجوم\n"
+            "• إسماعيل بن ناصر — قلب الوسط\n\n"
+            "⚠️ *نقاط الضعف:*\n"
+            "• يتراجع الأداء بغياب محرز\n"
+            "• يعاني أمام الفرق التي تتقن الكرة طويلاً"
         ),
         "en": (
-            "🔮 *Match Analysis*\n\n"
-            "📊 *Prediction:* Algeria 2-0 Jordan\n\n"
-            "💪 *Algeria strengths:*\n"
-            "• Mahrez — elite experience at the highest level\n"
-            "• All-Arab clash generates massive energy\n"
-            "• Physical strength and fast transitions\n\n"
-            "⚠️ *Jordan threat:*\n"
-            "• Historic first-ever World Cup qualification!\n"
-            "• Unbreakable fighting spirit\n"
-            "• Any point would be a historic achievement\n\n"
-            "🎯 *Tip:* Algeria are favorites — Jordan will fight with honor"
+            "🧠 *Tactical Analysis — Algeria*\n\n"
+            "📐 *Formation:* 4-3-3 / 4-2-3-1\n\n"
+            "⚙️ *Playing Style:*\n"
+            "• Medium press with rapid counter-attacking\n"
+            "• Mahrez roams freely behind strikers\n"
+            "• Dangerous from set pieces and free kicks\n"
+            "• Strong central defense hard to break down\n\n"
+            "🔑 *Key Players:*\n"
+            "• Riyad Mahrez — best Arab player of his era\n"
+            "• Baghdad Bounedjah — target striker\n"
+            "• Ismail Bennacer — midfield engine\n\n"
+            "⚠️ *Weaknesses:*\n"
+            "• Performance drops significantly without Mahrez\n"
+            "• Can struggle vs teams that dominate possession"
         ),
     },
-    "🇸🇦 Saudi Arabia vs 🇮🇷 Iran": {
+    "🇸🇦 Saudi Arabia": {
         "ar": (
-            "🔮 *تحليل المباراة*\n\n"
-            "📊 *التوقع:* السعودية 1-1 إيران\n\n"
-            "💪 *نقاط قوة السعودية:*\n"
-            "• ذكريات 2022 ضد الأرجنتين لا تُنسى!\n"
-            "• الدوري السعودي رفع مستوى اللاعبين\n"
-            "• الفهد الأخضر يلعب بثقة عالية\n\n"
-            "⚠️ *خطر إيران:*\n"
-            "• منتخب منظم ومجتهد دائماً\n"
-            "• هذه المباراة لها ثقل سياسي وعاطفي كبير\n"
-            "• أزيمون يلهم اللاعبين للأداء فوق مستواهم\n\n"
-            "🎯 *نصيحة:* مباراة مشحونة — توقع إيقاعاً عالياً وأهدافاً"
+            "🧠 *تحليل تكتيكي — السعودية*\n\n"
+            "📐 *التشكيلة:* 4-3-3 / 5-4-1\n\n"
+            "⚙️ *أسلوب اللعب:*\n"
+            "• دفاع أوفسايد منضبط على مستوى عالٍ\n"
+            "• الانتقال السريع — الأسلوب الذي صنع معجزة 2022\n"
+            "• ضغط جماعي متواصل يرهق الخصم\n"
+            "• التركيز الشديد والإيمان بالنفس بعد الأرجنتين\n\n"
+            "🔑 *اللاعبون المحوريون:*\n"
+            "• سالم الدوسري — قائد وصانع الفوارق\n"
+            "• فراس البريكان — سرعة ولياقة استثنائية\n"
+            "• محمد الباييّ — عقل الوسط\n\n"
+            "⚠️ *نقاط الضعف:*\n"
+            "• الكرة الثابتة الدفاعية نقطة ضعف\n"
+            "• يعاني أمام الفرق ذات الجودة الفردية العالية"
         ),
         "en": (
-            "🔮 *Match Analysis*\n\n"
-            "📊 *Prediction:* Saudi Arabia 1-1 Iran\n\n"
-            "💪 *Saudi Arabia strengths:*\n"
-            "• 2022 memories vs Argentina — belief is there!\n"
-            "• Saudi Pro League raised player levels\n"
-            "• Playing with high confidence\n\n"
-            "⚠️ *Iran threat:*\n"
-            "• Always organized and hardworking\n"
-            "• Heavy political and emotional stakes\n"
-            "• Players often over-perform in this fixture\n\n"
-            "🎯 *Tip:* Charged atmosphere — expect high intensity and goals"
+            "🧠 *Tactical Analysis — Saudi Arabia*\n\n"
+            "📐 *Formation:* 4-3-3 / 5-4-1\n\n"
+            "⚙️ *Playing Style:*\n"
+            "• Disciplined high defensive line (offside trap)\n"
+            "• Rapid transition — the formula that beat Argentina\n"
+            "• Relentless collective pressing\n"
+            "• Mental strength & belief after 2022\n\n"
+            "🔑 *Key Players:*\n"
+            "• Salem Al-Dawsari — captain and difference-maker\n"
+            "• Firas Al-Buraikan — exceptional pace & fitness\n"
+            "• Mohamed Al-Burayk — midfield brain\n\n"
+            "⚠️ *Weaknesses:*\n"
+            "• Defensive set pieces are a weak point\n"
+            "• Struggles vs teams with high individual quality"
         ),
     },
-}
-# ═══════════════════════════════════════════════════════
-#  DATA — STATS & RECORDS
-# ═══════════════════════════════════════════════════════
-
-STATS_MENU = {
-    "titles": {
+    "🇲🇦 Morocco": {
         "ar": (
-            "🏆 *أكثر المنتخبات تتويجاً بكأس العالم*\n\n"
-            "🥇 🇧🇷 البرازيل — 5 ألقاب (1958، 1962، 1970، 1994، 2002)\n"
-            "🥈 🇩🇪 ألمانيا — 4 ألقاب (1954، 1974، 1990، 2014)\n"
-            "🥈 🇮🇹 إيطاليا — 4 ألقاب (1934، 1938، 1982، 2006)\n"
-            "🥉 🇦🇷 الأرجنتين — 3 ألقاب (1978، 1986، 2022)\n"
-            "4️⃣ 🇫🇷 فرنسا — 2 لقب (1998، 2018)\n"
-            "4️⃣ 🇺🇾 أوروغواي — 2 لقب (1930، 1950)\n"
-            "4️⃣ 🏴󠁧󠁢󠁥󠁮󠁧󠁿 إنجلترا — 1 لقب (1966)\n"
-            "4️⃣ 🇪🇸 إسبانيا — 1 لقب (2010)\n\n"
-            "🎯 *من سيرفع الكأس في 2026؟*"
+            "🧠 *تحليل تكتيكي — المغرب*\n\n"
+            "📐 *التشكيلة:* 4-3-3 / 4-1-4-1\n\n"
+            "⚙️ *أسلوب اللعب:*\n"
+            "• دفاع متماسك كتلة صلبة يصعب اختراقها\n"
+            "• الانتقالات السريعة بعد استعادة الكرة\n"
+            "• الضغط في الثلث الوسط لاستنزاف الخصم\n"
+            "• رهبة نفسية بعد إنجاز نصف النهائي 2022\n\n"
+            "🔑 *اللاعبون المحوريون:*\n"
+            "• حكيم زياش — إبداع وتمريرات قاتلة\n"
+            "• يوسف النصيري — مهاجم خطير ونهائيات قوية\n"
+            "• ياسين بونو — أفضل حارس أفريقي\n\n"
+            "⚠️ *نقاط الضعف:*\n"
+            "• الإبداع الهجومي يتراجع بغياب زياش\n"
+            "• يعاني أمام الفرق ذات التنظيم التكتيكي العالي"
         ),
         "en": (
-            "🏆 *Most World Cup Titles*\n\n"
-            "🥇 🇧🇷 Brazil — 5 titles (1958, 1962, 1970, 1994, 2002)\n"
-            "🥈 🇩🇪 Germany — 4 titles (1954, 1974, 1990, 2014)\n"
-            "🥈 🇮🇹 Italy — 4 titles (1934, 1938, 1982, 2006)\n"
-            "🥉 🇦🇷 Argentina — 3 titles (1978, 1986, 2022)\n"
-            "4️⃣ 🇫🇷 France — 2 titles (1998, 2018)\n"
-            "4️⃣ 🇺🇾 Uruguay — 2 titles (1930, 1950)\n"
-            "4️⃣ 🏴󠁧󠁢󠁥󠁮󠁧󠁿 England — 1 title (1966)\n"
-            "4️⃣ 🇪🇸 Spain — 1 title (2010)\n\n"
-            "🎯 *Who lifts the trophy in 2026?*"
+            "🧠 *Tactical Analysis — Morocco*\n\n"
+            "📐 *Formation:* 4-3-3 / 4-1-4-1\n\n"
+            "⚙️ *Playing Style:*\n"
+            "• Compact defensive block very hard to break\n"
+            "• Fast transitions after winning the ball\n"
+            "• Mid-block pressing to exhaust opponents\n"
+            "• Psychological edge after 2022 semifinal run\n\n"
+            "🔑 *Key Players:*\n"
+            "• Hakim Ziyech — creativity and killer passes\n"
+            "• Youssef En-Nesyri — dangerous striker, strong finisher\n"
+            "• Yassine Bono — best African goalkeeper\n\n"
+            "⚠️ *Weaknesses:*\n"
+            "• Attack loses flair without Ziyech\n"
+            "• Can struggle vs high tactical organization"
         ),
     },
-    "scorers": {
-        "ar": (
-            "⚽ *أكثر اللاعبين تسجيلاً في كأس العالم*\n\n"
-            "🥇 🇩🇪 ميروسلاف كلوزه — 16 هدف\n"
-            "🥈 🇧🇷 رونالدو نازاريو — 15 هدف\n"
-            "🥉 🇩🇪 غيرد مولر — 14 هدف\n"
-            "4️⃣ 🇫🇷 جوست فونتين — 13 هدف\n"
-            "5️⃣ 🇦🇷 ليونيل ميسي — 13 هدف ⭐\n"
-            "6️⃣ 🇧🇷 بيليه — 12 هدف\n"
-            "7️⃣ 🇫🇷 كيليان مبابي — 12 هدف 🔥\n\n"
-            "🎯 *هل سيتصدر مبابي القائمة في 2026؟*"
-        ),
-        "en": (
-            "⚽ *All-Time World Cup Top Scorers*\n\n"
-            "🥇 🇩🇪 Miroslav Klose — 16 goals\n"
-            "🥈 🇧🇷 Ronaldo Nazário — 15 goals\n"
-            "🥉 🇩🇪 Gerd Müller — 14 goals\n"
-            "4️⃣ 🇫🇷 Just Fontaine — 13 goals\n"
-            "5️⃣ 🇦🇷 Lionel Messi — 13 goals ⭐\n"
-            "6️⃣ 🇧🇷 Pelé — 12 goals\n"
-            "7️⃣ 🇫🇷 Kylian Mbappé — 12 goals 🔥\n\n"
-            "🎯 *Will Mbappé top the list in 2026?*"
-        ),
-    },
-    "wc2026_facts": {
-        "ar": (
-            "📊 *إحصائيات كأس العالم 2026*\n\n"
-            "🌍 *الدول المضيفة:* أمريكا 🇺🇸 | المكسيك 🇲🇽 | كندا 🇨🇦\n"
-            "⚽ *عدد الفرق:* 48 فريق (أكبر نسخة في التاريخ)\n"
-            "🎮 *عدد المباريات:* 104 مباراة\n"
-            "📅 *المدة:* 39 يوماً (11 يونيو — 19 يوليو)\n"
-            "🏟️ *الملاعب:* 16 ملعب في 3 دول\n"
-            "👥 *المشجعين المتوقعين:* 5+ مليون\n"
-            "💰 *الجائزة الإجمالية:* 1 مليار دولار!\n"
-            "📺 *المشاهدين المتوقعين:* 5+ مليار حول العالم\n\n"
-            "🌟 *أبرز الملاعب:*\n"
-            "🏟️ MetLife Stadium — نيويورك (82,500 مقعد)\n"
-            "🏟️ Estadio Azteca — المكسيك (87,000 مقعد)\n"
-            "🏟️ Rose Bowl — لوس أنجلوس (90,888 مقعد)"
-        ),
-        "en": (
-            "📊 *World Cup 2026 Key Stats*\n\n"
-            "🌍 *Hosts:* USA 🇺🇸 | Mexico 🇲🇽 | Canada 🇨🇦\n"
-            "⚽ *Teams:* 48 (biggest ever)\n"
-            "🎮 *Matches:* 104 total\n"
-            "📅 *Duration:* 39 days (Jun 11 — Jul 19)\n"
-            "🏟️ *Stadiums:* 16 across 3 nations\n"
-            "👥 *Expected attendance:* 5+ million\n"
-            "💰 *Prize money:* $1 Billion!\n"
-            "📺 *Global viewers:* 5+ billion\n\n"
-            "🌟 *Key Venues:*\n"
-            "🏟️ MetLife Stadium — New York (82,500 seats)\n"
-            "🏟️ Estadio Azteca — Mexico (87,000 seats)\n"
-            "🏟️ Rose Bowl — Los Angeles (90,888 seats)"
-        ),
-    },
-    "arab_teams": {
-        "ar": (
-            "🌙 *المنتخبات العربية في كأس العالم 2026*\n\n"
-            "🇸🇦 *السعودية* — المجموعة E\n"
-            "مع: إسبانيا 🇪🇸 | بلجيكا 🇧🇪 | إيران 🇮🇷\n"
-            "⭐ أبطال لحظة 2022 ضد الأرجنتين!\n\n"
-            "🇲🇦 *المغرب* — المجموعة G\n"
-            "مع: البرازيل 🇧🇷 | هايتي 🇭🇹 | أستراليا 🇦🇺\n"
-            "⭐ نصف نهائي 2022 — أسود الأطلس يطمحون للأعلى!\n\n"
-            "🇩🇿 *الجزائر* — المجموعة I\n"
-            "مع: الأرجنتين 🇦🇷 | النمسا 🇦🇹 | الأردن 🇯🇴\n"
-            "⭐ مجموعة صعبة — لكن الجزائر قادرة على المفاجأة!\n\n"
-            "🇹🇳 *تونس* — المجموعة C\n"
-            "مع: أمريكا 🇺🇸 | باراغواي 🇵🇾 | السويد 🇸🇪\n"
-            "⭐ النسر القرطاجي يريد التقدم للدور الثاني!\n\n"
-            "🇮🇶 *العراق* — المجموعة F\n"
-            "مع: فرنسا 🇫🇷 | السنغال 🇸🇳 | النرويج 🇳🇴\n"
-            "⭐ عودة تاريخية للمونديال بعد غياب طويل!\n\n"
-            "🇯🇴 *الأردن* — المجموعة I\n"
-            "مع: الأرجنتين 🇦🇷 | النمسا 🇦🇹 | الجزائر 🇩🇿\n"
-            "⭐ أول مشاركة في كأس العالم — إنجاز تاريخي!\n\n"
-            "🇶🇦 *قطر* — المجموعة B\n"
-            "مع: كندا 🇨🇦 | البوسنة 🇧🇦 | سويسرا 🇨🇭\n"
-            "⭐ بطل مونديال 2022 يريد إثبات الذات!"
-        ),
-        "en": (
-            "🌙 *Arab Teams at World Cup 2026*\n\n"
-            "🇸🇦 *Saudi Arabia* — Group E\n"
-            "vs: Spain 🇪🇸 | Belgium 🇧🇪 | Iran 🇮🇷\n"
-            "⭐ Heroes of the 2022 Argentina shock!\n\n"
-            "🇲🇦 *Morocco* — Group G\n"
-            "vs: Brazil 🇧🇷 | Haiti 🇭🇹 | Australia 🇦🇺\n"
-            "⭐ 2022 semifinalists — Atlas Lions aim higher!\n\n"
-            "🇩🇿 *Algeria* — Group I\n"
-            "vs: Argentina 🇦🇷 | Austria 🇦🇹 | Jordan 🇯🇴\n"
-            "⭐ Tough group — but Algeria can surprise!\n\n"
-            "🇹🇳 *Tunisia* — Group C\n"
-            "vs: USA 🇺🇸 | Paraguay 🇵🇾 | Sweden 🇸🇪\n"
-            "⭐ Eagles of Carthage want Round of 32!\n\n"
-            "🇮🇶 *Iraq* — Group F\n"
-            "vs: France 🇫🇷 | Senegal 🇸🇳 | Norway 🇳🇴\n"
-            "⭐ Historic return to the World Cup stage!\n\n"
-            "🇯🇴 *Jordan* — Group I\n"
-            "vs: Argentina 🇦🇷 | Austria 🇦🇹 | Algeria 🇩🇿\n"
-            "⭐ First ever World Cup — a historic achievement!\n\n"
-            "🇶🇦 *Qatar* — Group B\n"
-            "vs: Canada 🇨🇦 | Bosnia 🇧🇦 | Switzerland 🇨🇭\n"
-            "⭐ 2022 hosts want to prove themselves!"
-        ),
-    },
-    "favorites": {
-        "ar": (
-            "🎯 *المرشحون للقب — تحليل 2026*\n\n"
-            "1️⃣ 🇫🇷 *فرنسا* — الأوفر حظاً\n"
-            "مبابي في قمته + جيل ذهبي كامل\n"
-            "نسبة الفوز: 18%\n\n"
-            "2️⃣ 🇧🇷 *البرازيل* — الأبدية\n"
-            "فينيسيوس + جيل جديد متهافت + الجوع للقب\n"
-            "نسبة الفوز: 15%\n\n"
-            "3️⃣ 🇦🇷 *الأرجنتين* — المدافعة\n"
-            "ميسي + الكيمياء الفريدة بعد 2022\n"
-            "نسبة الفوز: 14%\n\n"
-            "4️⃣ 🇩🇪 *ألمانيا* — الآلة\n"
-            "جيل جديد + فلسفة كرة جميلة\n"
-            "نسبة الفوز: 12%\n\n"
-            "5️⃣ 🏴󠁧󠁢󠁥󠁮󠁧󠁿 *إنجلترا* — الموعد مع التاريخ؟\n"
-            "بيلينغهام + ساكا + فودن — جيل استثنائي\n"
-            "نسبة الفوز: 11%\n\n"
-            "6️⃣ 🇪🇸 *إسبانيا* — اليافعون الخطرون\n"
-            "يامال وبيدري ولامين — مستقبل الكرة\n"
-            "نسبة الفوز: 10%"
-        ),
-        "en": (
-            "🎯 *Title Favorites — 2026 Analysis*\n\n"
-            "1️⃣ 🇫🇷 *France* — Top Favorites\n"
-            "Mbappe at his peak + complete golden generation\n"
-            "Win probability: 18%\n\n"
-            "2️⃣ 🇧🇷 *Brazil* — The Eternal\n"
-            "Vinicius + hungry new generation\n"
-            "Win probability: 15%\n\n"
-            "3️⃣ 🇦🇷 *Argentina* — The Defenders\n"
-            "Messi + unique chemistry after 2022\n"
-            "Win probability: 14%\n\n"
-            "4️⃣ 🇩🇪 *Germany* — The Machine\n"
-            "New generation + beautiful football philosophy\n"
-            "Win probability: 12%\n\n"
-            "5️⃣ 🏴󠁧󠁢󠁥󠁮󠁧󠁿 *England* — Date with destiny?\n"
-            "Bellingham + Saka + Foden — exceptional generation\n"
-            "Win probability: 11%\n\n"
-            "6️⃣ 🇪🇸 *Spain* — Dangerous Youngsters\n"
-            "Yamal, Pedri, Lamine — the future of football\n"
-            "Win probability: 10%"
-        ),
-    },
-}
-
-# ═══════════════════════════════════════════════════════
-#  DATA — FUN FACTS
-# ═══════════════════════════════════════════════════════
-
-FUN_FACTS = [
+        }
+    FUN_FACTS = [
     "⚽ كأس العالم 2026 هو الأكبر في التاريخ: 48 فريق، 104 مباراة، 3 دول مضيفة!\n🌍 The 2026 WC is the biggest ever: 48 teams, 104 matches, 3 host nations!",
-    "🏟️ ملعب أزتيكا يستضيف مباريات الافتتاح — الوحيد الذي شهد نهائيَّين (1970 و1986)!\n🏟️ Azteca hosts the opener — the only stadium to stage two finals (1970 & 1986)!",
-    "⭐ ميسي (13 هدف) على بُعد 3 أهداف فقط من سجل كلوزه الأبدي (16 هدف)!\n⭐ Messi (13 goals) is just 3 goals away from Klose's all-time record (16 goals)!",
-    "🇸🇦 السعودية هزمت الأرجنتين في 2022 في واحدة من أكبر المفاجآت في تاريخ المونديال!\n🇸🇦 Saudi Arabia shocked Argentina in 2022 — one of the biggest upsets in WC history!",
-    "🇲🇦 المغرب هو أول منتخب أفريقي وعربي يبلغ نصف نهائي كأس العالم في 2022!\n🇲🇦 Morocco became the first African & Arab team to reach a WC semifinal in 2022!",
-    "💰 جائزة كأس العالم 2026 ستتجاوز المليار دولار لأول مرة في التاريخ!\n💰 The 2026 prize fund will exceed $1 billion for the first time in history!",
-    "🇯🇴 الأردن يشارك لأول مرة في تاريخه في كأس العالم — إنجاز تاريخي للكرة العربية!\n🇯🇴 Jordan participate in their first-ever World Cup — a historic achievement!",
-    "🇮🇶 العراق يعود لكأس العالم بعد غياب طويل — آخر مشاركة كانت عام 1986!\n🇮🇶 Iraq return to the World Cup after a long absence — last appearance was 1986!",
-    "📺 كأس العالم 1994 في أمريكا — الأكثر مشاهدةً في التاريخ آنذاك. هل سيكسر 2026 الرقم؟\n📺 1994 WC in USA was the most-watched ever at the time. Will 2026 break the record?",
-    "🌡️ المباريات ستُلعب في يونيو-يوليو في أمريكا الشمالية — درجات حرارة مختلفة بين المدن!\n🌡️ Matches in June-July across North America — wildly different temperatures city to city!",
-    "🎯 فرنسا آخر منتخب فاز بكأسين متتاليين (1998-2018). هل تحقق الثلاثية؟\n🎯 France last won back-to-back titles (1998-2018). Can they complete the treble?",
-    "🔢 بدلاً من 32 فريقاً كما كان سابقاً، تضم النسخة 2026 لأول مرة 48 منتخباً!\n🔢 For the first time ever, 2026 features 48 teams instead of the previous 32!",
+    "🏟️ ملعب أزتيكا الوحيد الذي شهد نهائيَّين متتاليين (1970 و1986)!\n🏟️ Azteca is the only stadium to host two finals (1970 & 1986)!",
+    "⭐ مبابي (12 هدفاً) يحتاج 4 أهداف فقط ليتفوق على كلوزه (16)!\n⭐ Mbappe (12 goals) needs just 4 more to surpass Klose's all-time record!",
+    "🇸🇦 فوز السعودية على الأرجنتين 2022 صنّفه خبراء إحصاء كأكبر مفاجأة رياضية منذ 30 عاماً!\n🇸🇦 Saudi's 2022 win vs Argentina was statistically the biggest sports upset in 30 years!",
+    "🇲🇦 المغرب أول منتخب أفريقي وعربي يبلغ نصف نهائي كأس العالم!\n🇲🇦 Morocco — first African & Arab team ever to reach a World Cup semifinal!",
+    "💰 جائزة كأس العالم 2026 ستتجاوز المليار دولار — ضعف نسخة 2022!\n💰 2026 prize fund exceeds $1 billion — double the 2022 edition!",
+    "🇯🇴 الأردن يشارك لأول مرة في تاريخه — إنجاز تاريخي للكرة العربية!\n🇯🇴 Jordan's first ever World Cup — a historic milestone for Arab football!",
+    "📐 فرنسا استخدمت 6 تشكيلات مختلفة في طريقها للقب 2018!\n📐 France used 6 different formations on their way to the 2018 title!",
+    "🎯 ألمانيا الوحيدة التي فازت بكأس العالم في ثلاث قارات مختلفة!\n🎯 Germany is the only team to win the World Cup on three different continents!",
+    "🧠 متوسط مسافة الجري لكل لاعب في كأس العالم: 11 كيلومتر لكل مباراة!\n🧠 Average distance covered per player at the World Cup: 11 km per match!",
+    "🔢 للمرة الأولى في التاريخ 48 منتخباً بدلاً من 32!\n🔢 First time ever: 48 nations qualify instead of 32!",
+    "⏱️ إجمالي دقائق اللعب في كأس العالم 2026: 9,880 دقيقة من الإثارة!\n⏱️ Total playing time in WC 2026: 9,880 minutes of football!",
 ]
 
-# ═══════════════════════════════════════════════════════
-#  HELPERS
-# ═══════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════
+#  LANG HELPERS
+# ═══════════════════════════════════════════════════════════════════
 
 user_lang = {}
 
-def get_lang(uid): return user_lang.get(uid, "ar")
-def today_str(): return date.today().strftime("%Y-%m-%d")
+def get_lang(uid):
+    db = load_db()
+    return db["users"].get(str(uid), {}).get("lang", user_lang.get(uid, "ar"))
+
+def today_str():
+    return date.today().strftime("%Y-%m-%d")
+
+# ═══════════════════════════════════════════════════════════════════
+#  KEYBOARDS
+# ═══════════════════════════════════════════════════════════════════
 
 def main_keyboard(lang="ar"):
     if lang == "ar":
         return InlineKeyboardMarkup([
             [InlineKeyboardButton("📅 مباريات اليوم", callback_data="today"),
              InlineKeyboardButton("⚽ مباريات الغد", callback_data="tomorrow")],
-            [InlineKeyboardButton("🔮 التوقعات", callback_data="predictions"),
+            [InlineKeyboardButton("🔴 مباشر LIVE", callback_data="live"),
+             InlineKeyboardButton("🔮 التوقعات", callback_data="predictions")],
+            [InlineKeyboardButton("🧠 تحليل تكتيكي", callback_data="tactical"),
              InlineKeyboardButton("📊 إحصائيات", callback_data="stats")],
             [InlineKeyboardButton("🏆 المجموعات", callback_data="groups"),
-             InlineKeyboardButton("🌙 المنتخبات العربية", callback_data="stat_arab_teams")],
+             InlineKeyboardButton("🌙 المنتخبات العربية", callback_data="arab_teams")],
             [InlineKeyboardButton("🌟 معلومة مثيرة", callback_data="fact"),
              InlineKeyboardButton("🌐 English", callback_data="lang_en")],
         ])
@@ -490,62 +496,196 @@ def main_keyboard(lang="ar"):
         return InlineKeyboardMarkup([
             [InlineKeyboardButton("📅 Today's Matches", callback_data="today"),
              InlineKeyboardButton("⚽ Tomorrow", callback_data="tomorrow")],
-            [InlineKeyboardButton("🔮 Predictions", callback_data="predictions"),
+            [InlineKeyboardButton("🔴 LIVE Now", callback_data="live"),
+             InlineKeyboardButton("🔮 Predictions", callback_data="predictions")],
+            [InlineKeyboardButton("🧠 Tactical Analysis", callback_data="tactical"),
              InlineKeyboardButton("📊 Statistics", callback_data="stats")],
             [InlineKeyboardButton("🏆 Groups", callback_data="groups"),
-             InlineKeyboardButton("🌙 Arab Teams", callback_data="stat_arab_teams")],
+             InlineKeyboardButton("🌙 Arab Teams", callback_data="arab_teams")],
             [InlineKeyboardButton("🌟 Fun Fact", callback_data="fact"),
              InlineKeyboardButton("🌐 عربي", callback_data="lang_ar")],
         ])
 
+def back_btn(target="back"):
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع | Back", callback_data=target)]])
+
+# ═══════════════════════════════════════════════════════════════════
+#  MATCH TEXT BUILDER
+# ═══════════════════════════════════════════════════════════════════
+
 def build_matches_text(date_key, lang="ar"):
     matches = MATCHES_BY_DATE.get(date_key, [])
     if not matches:
-        return "😴 لا مباريات في هذا اليوم\n😴 No matches scheduled" if lang == "ar" else "😴 No matches scheduled today"
+        return "😴 لا مباريات في هذا اليوم\n😴 No matches scheduled"
     label = "مباريات" if lang == "ar" else "Matches"
-    grp_label = "المجموعة" if lang == "ar" else "Group"
-    lines = [f"⚽ *{label} — {date_key}*\n{'─'*25}"]
+    grp_lbl = "المجموعة" if lang == "ar" else "Group"
+    lines = [f"⚽ *{label} — {date_key}*\n{'━'*22}"]
     for m in matches:
         lines.append(
             f"\n🆚 *{m['home']}  vs  {m['away']}*\n"
-            f"🕐 {m['time']} (GMT+1)  |  {grp_label} {m['group']}\n"
+            f"🕐 {m['time']} GMT+1  |  {grp_lbl} {m['group']}\n"
             f"🏟️ {m['stadium']}, {m['city']}"
         )
     return "\n".join(lines)
 
-# ═══════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════
+#  PREDICTIONS DATA
+# ═══════════════════════════════════════════════════════════════════
+
+PREDICTIONS = {
+    "🇲🇽 Mexico vs 🇿🇦 South Africa": {
+        "ar": "🔮 *تحليل المباراة*\n\n🏟️ أزتيكا — أكثر الملاعب سحراً في التاريخ\n📊 *التوقع:* المكسيك 2-0 جنوب أفريقيا\n\n💪 *المكسيك:* الجمهور، السرعة على الأجنحة، خبرة المونديال\n⚠️ *جنوب أفريقيا:* دفاع منظم، لا يخسران شيئاً\n\n🎯 المكسيك تسجل أولاً — احتمال 78%",
+        "en": "🔮 *Match Analysis*\n\n🏟️ Azteca — the most iconic WC stadium ever\n📊 *Prediction:* Mexico 2-0 South Africa\n\n💪 *Mexico:* Home crowd, pace on wings, WC experience\n⚠️ *South Africa:* Organized defense, nothing to lose\n\n🎯 Mexico to score first — 78% probability",
+    },
+    "🇧🇷 Brazil vs 🇲🇦 Morocco": {
+        "ar": "🔮 *تحليل المباراة*\n\n📊 *التوقع:* البرازيل 2-1 المغرب\n\n💪 *البرازيل:* فينيسيوس في أفضل حالاته، جيل ذهبي\n⚠️ *المغرب:* نصف نهائي 2022، دفاع عالمي المستوى\n\n🎯 مباراة مفتوحة — أهداف في الشوطين",
+        "en": "🔮 *Match Analysis*\n\n📊 *Prediction:* Brazil 2-1 Morocco\n\n💪 *Brazil:* Vinicius at his best, golden generation\n⚠️ *Morocco:* 2022 semifinalists, world-class defense\n\n🎯 Open game — goals expected in both halves",
+    },
+    "🇫🇷 France vs 🇸🇳 Senegal": {
+        "ar": "🔮 *تحليل المباراة*\n\n📊 *التوقع:* فرنسا 2-1 السنغال\n\n💪 *فرنسا:* مبابي + جريزمان = أخطر ثنائي في العالم\n⚠️ *السنغال:* مانيه، روح قتالية، هزموا فرنسا من قبل!\n\n🎯 فرنسا المرشحة للقب — لكن مباراة صعبة",
+        "en": "🔮 *Match Analysis*\n\n📊 *Prediction:* France 2-1 Senegal\n\n💪 *France:* Mbappe + Griezmann = world's most dangerous duo\n⚠️ *Senegal:* Mane, fighting spirit, beat France before!\n\n🎯 France are title favorites — but this will be tough",
+    },
+    "🇦🇷 Argentina vs 🇦🇹 Austria": {
+        "ar": "🔮 *تحليل المباراة*\n\n📊 *التوقع:* الأرجنتين 3-0 النمسا\n\n💪 *الأرجنتين:* ميسي يريد التاريخ، كيمياء الفريق استثنائية\n⚠️ *النمسا:* منظمون ومجتهدون لكن الفجوة كبيرة\n\n🎯 ميسي جائع للتاريخ — توقع عرضاً استثنائياً",
+        "en": "🔮 *Match Analysis*\n\n📊 *Prediction:* Argentina 3-0 Austria\n\n💪 *Argentina:* Messi wants history, exceptional team chemistry\n⚠️ *Austria:* Organized and hardworking but the gap is huge\n\n🎯 Messi is hungry for history — expect a masterclass",
+    },
+    "🇩🇿 Algeria vs 🇯🇴 Jordan": {
+        "ar": "🔮 *تحليل المباراة*\n\n📊 *التوقع:* الجزائر 2-0 الأردن\n\n💪 *الجزائر:* محرز، خبرة كبيرة، الكرات الثابتة فتاكة\n⚠️ *الأردن:* أول مشاركة، روح قتالية، لا يخسران شيئاً!\n\n🎯 الجزائر بالنقاط — الأردن سيكافح بشرف",
+        "en": "🔮 *Match Analysis*\n\n📊 *Prediction:* Algeria 2-0 Jordan\n\n💪 *Algeria:* Mahrez, big experience, deadly set pieces\n⚠️ *Jordan:* First WC ever, fighting spirit, nothing to lose!\n\n🎯 Algeria on points — Jordan will fight with honor",
+    },
+    "🇸🇦 Saudi Arabia vs 🇮🇷 Iran": {
+        "ar": "🔮 *تحليل المباراة*\n\n📊 *التوقع:* السعودية 1-1 إيران\n\n💪 *السعودية:* ذكريات 2022 تمنح ثقة هائلة\n⚠️ *إيران:* مباراة مشحونة، اللاعبون يتجاوزون مستواهم\n\n🎯 مباراة نارية — توقع إيقاعاً عالياً",
+        "en": "🔮 *Match Analysis*\n\n📊 *Prediction:* Saudi Arabia 1-1 Iran\n\n💪 *Saudi Arabia:* 2022 memories bring massive confidence\n⚠️ *Iran:* Emotionally charged — players overperform here\n\n🎯 Fiery clash — expect high intensity throughout",
+    },
+}
+
+# ═══════════════════════════════════════════════════════════════════
+#  ARAB TEAMS TEXT
+# ═══════════════════════════════════════════════════════════════════
+
+ARAB_TEAMS = {
+    "ar": (
+        "🌙 *المنتخبات العربية — كأس العالم 2026*\n\n"
+        "🇸🇦 *السعودية* — المجموعة E\n إسبانيا 🇪🇸 | بلجيكا 🇧🇪 | إيران 🇮🇷 | ⭐ أبطال 2022 ضد الأرجنتين!\n\n"
+        "🇲🇦 *المغرب* — المجموعة G\n البرازيل 🇧🇷 | هايتي 🇭🇹 | أستراليا 🇦🇺 | ⭐ نصف نهائي 2022!\n\n"
+        "🇩🇿 *الجزائر* — المجموعة I\n الأرجنتين 🇦🇷 | النمسا 🇦🇹 | الأردن 🇯🇴 | ⭐ مجموعة نار!\n\n"
+        "🇹🇳 *تونس* — المجموعة C\n أمريكا 🇺🇸 | باراغواي 🇵🇾 | السويد 🇸🇪 | ⭐ يسعى للدور الثاني!\n\n"
+        "🇮🇶 *العراق* — المجموعة F\n فرنسا 🇫🇷 | السنغال 🇸🇳 | النرويج 🇳🇴 | ⭐ عودة تاريخية!\n\n"
+        "🇯🇴 *الأردن* — المجموعة I\n الأرجنتين 🇦🇷 | النمسا 🇦🇹 | الجزائر 🇩🇿 | ⭐ أول مشاركة في التاريخ!\n\n"
+        "🇶🇦 *قطر* — المجموعة B\n كندا 🇨🇦 | البوسنة 🇧🇦 | سويسرا 🇨🇭 | ⭐ يريد إثبات الذات!"
+    ),
+    "en": (
+        "🌙 *Arab Teams — World Cup 2026*\n\n"
+        "🇸🇦 *Saudi Arabia* — Group E\n Spain 🇪🇸 | Belgium 🇧🇪 | Iran 🇮🇷 | ⭐ Heroes of the 2022 Argentina shock!\n\n"
+        "🇲🇦 *Morocco* — Group G\n Brazil 🇧🇷 | Haiti 🇭🇹 | Australia 🇦🇺 | ⭐ 2022 semifinalists!\n\n"
+        "🇩🇿 *Algeria* — Group I\n Argentina 🇦🇷 | Austria 🇦🇹 | Jordan 🇯🇴 | ⭐ Group of Death!\n\n"
+        "🇹🇳 *Tunisia* — Group C\n USA 🇺🇸 | Paraguay 🇵🇾 | Sweden 🇸🇪 | ⭐ Targeting Round of 32!\n\n"
+        "🇮🇶 *Iraq* — Group F\n France 🇫🇷 | Senegal 🇸🇳 | Norway 🇳🇴 | ⭐ Historic return!\n\n"
+        "🇯🇴 *Jordan* — Group I\n Argentina 🇦🇷 | Austria 🇦🇹 | Algeria 🇩🇿 | ⭐ First ever World Cup!\n\n"
+        "🇶🇦 *Qatar* — Group B\n Canada 🇨🇦 | Bosnia 🇧🇦 | Switzerland 🇨🇭 | ⭐ Proving a point!"
+    ),
+}
+STATS_TEXT = {
+    "titles": {
+        "ar": "🏆 *أكثر المنتخبات تتويجاً*\n\n🥇 🇧🇷 البرازيل — 5\n🥈 🇩🇪 ألمانيا — 4\n🥈 🇮🇹 إيطاليا — 4\n🥉 🇦🇷 الأرجنتين — 3\n4️⃣ 🇫🇷 فرنسا — 2\n4️⃣ 🇺🇾 أوروغواي — 2\n6️⃣ 🏴󠁧󠁢󠁥󠁮󠁧󠁿 إنجلترا — 1\n6️⃣ 🇪🇸 إسبانيا — 1",
+        "en": "🏆 *Most World Cup Titles*\n\n🥇 🇧🇷 Brazil — 5\n🥈 🇩🇪 Germany — 4\n🥈 🇮🇹 Italy — 4\n🥉 🇦🇷 Argentina — 3\n4️⃣ 🇫🇷 France — 2\n4️⃣ 🇺🇾 Uruguay — 2\n6️⃣ 🏴󠁧󠁢󠁥󠁮󠁧󠁿 England — 1\n6️⃣ 🇪🇸 Spain — 1",
+    },
+    "scorers": {
+        "ar": "⚽ *هدافو كأس العالم على مر التاريخ*\n\n🥇 🇩🇪 كلوزه — 16 هدف\n🥈 🇧🇷 رونالدو — 15\n🥉 🇩🇪 غيرد مولر — 14\n4️⃣ 🇫🇷 فونتين — 13\n4️⃣ 🇦🇷 ميسي — 13 ⭐\n6️⃣ 🇧🇷 بيليه — 12\n6️⃣ 🇫🇷 مبابي — 12 🔥\n\n🎯 هل سيتصدر مبابي القائمة في 2026؟",
+        "en": "⚽ *All-Time World Cup Top Scorers*\n\n🥇 🇩🇪 Klose — 16\n🥈 🇧🇷 Ronaldo — 15\n🥉 🇩🇪 Müller — 14\n4️⃣ 🇫🇷 Fontaine — 13\n4️⃣ 🇦🇷 Messi — 13 ⭐\n6️⃣ 🇧🇷 Pelé — 12\n6️⃣ 🇫🇷 Mbappé — 12 🔥\n\n🎯 Will Mbappé top the list in 2026?",
+    },
+    "favorites": {
+        "ar": "🎯 *المرشحون للقب — 2026*\n\n1️⃣ 🇫🇷 فرنسا — 18%\n2️⃣ 🇧🇷 البرازيل — 15%\n3️⃣ 🇦🇷 الأرجنتين — 14%\n4️⃣ 🇩🇪 ألمانيا — 12%\n5️⃣ 🏴󠁧󠁢󠁥󠁮󠁧󠁿 إنجلترا — 11%\n6️⃣ 🇪🇸 إسبانيا — 10%\n7️⃣ 🇵🇹 البرتغال — 8%",
+        "en": "🎯 *Title Favorites — 2026*\n\n1️⃣ 🇫🇷 France — 18%\n2️⃣ 🇧🇷 Brazil — 15%\n3️⃣ 🇦🇷 Argentina — 14%\n4️⃣ 🇩🇪 Germany — 12%\n5️⃣ 🏴󠁧󠁢󠁥󠁮󠁧󠁿 England — 11%\n6️⃣ 🇪🇸 Spain — 10%\n7️⃣ 🇵🇹 Portugal — 8%",
+    },
+    "wc2026": {
+        "ar": "📊 *إحصائيات كأس العالم 2026*\n\n🌍 3 دول مضيفة\n⚽ 48 منتخباً\n🎮 104 مباراة\n🏟️ 16 ملعباً\n📅 39 يوماً\n👥 5+ مليون مشجع\n💰 1 مليار دولار جوائز\n📺 5+ مليار مشاهد",
+        "en": "📊 *World Cup 2026 Key Stats*\n\n🌍 3 host nations\n⚽ 48 teams\n🎮 104 matches\n🏟️ 16 stadiums\n📅 39 days\n👥 5+ million fans\n💰 $1 billion prize fund\n📺 5+ billion viewers",
+    },
+}
+
+# ═══════════════════════════════════════════════════════════════════
 #  HANDLERS
-# ═══════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    lang = get_lang(uid)
-    name = update.effective_user.first_name or "Champion"
+    user = update.effective_user
+    data = register_user(user)
+    lang = data.get("lang", "ar")
+    name = user.first_name or "Champion"
     wc_start = date(2026, 6, 11)
-    days_left = (wc_start - date.today()).days
-    countdown = f"⏳ *{days_left} يوم على الانطلاق!*" if lang == "ar" else f"⏳ *{days_left} days to kickoff!*"
+    days_left = max((wc_start - date.today()).days, 0)
+    total_users = get_subscriber_count()
 
     if lang == "ar":
+        countdown = f"⏳ *{days_left} يوم على الانطلاق!*" if days_left > 0 else "🔴 *البطولة انطلقت!*"
         text = (
             f"🌍⚽ *أهلاً {name}!*\n\n"
-            f"مرحباً في *بوت كأس العالم 2026* الرسمي!\n\n"
-            f"🏆 *البطولة:* 11 يونيو — 19 يوليو 2026\n"
-            f"🌎 *المضيفون:* أمريكا 🇺🇸 | المكسيك 🇲🇽 | كندا 🇨🇦\n"
-            f"⭐ *48 فريق | 104 مباراة | 16 ملعب*\n\n"
-            f"{countdown}\n\n"
+            f"مرحباً في *بوت كأس العالم 2026 الاحترافي*\n\n"
+            f"🏆 11 يونيو — 19 يوليو 2026\n"
+            f"🌎 أمريكا 🇺🇸 | المكسيك 🇲🇽 | كندا 🇨🇦\n"
+            f"⭐ 48 فريق | 104 مباراة | 16 ملعب\n\n"
+            f"{countdown}\n"
+            f"👥 {total_users} مشترك معنا الآن\n\n"
             f"اختر ما تريد 👇"
         )
     else:
+        countdown = f"⏳ *{days_left} days to kickoff!*" if days_left > 0 else "🔴 *Tournament is LIVE!*"
         text = (
             f"🌍⚽ *Welcome {name}!*\n\n"
-            f"Your ultimate *World Cup 2026* companion!\n\n"
-            f"🏆 *Tournament:* June 11 — July 19, 2026\n"
-            f"🌎 *Hosts:* USA 🇺🇸 | Mexico 🇲🇽 | Canada 🇨🇦\n"
-            f"⭐ *48 teams | 104 matches | 16 stadiums*\n\n"
-            f"{countdown}\n\n"
+            f"*World Cup 2026 Pro Bot*\n\n"
+            f"🏆 June 11 — July 19, 2026\n"
+            f"🌎 USA 🇺🇸 | Mexico 🇲🇽 | Canada 🇨🇦\n"
+            f"⭐ 48 teams | 104 matches | 16 stadiums\n\n"
+            f"{countdown}\n"
+            f"👥 {total_users} subscribers with us\n\n"
             f"Choose what you need 👇"
         )
     await update.message.reply_text(text, parse_mode="Markdown", reply_markup=main_keyboard(lang))
+
+
+async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if uid != ADMIN_ID:
+        await update.message.reply_text("⛔ غير مصرح | Unauthorized")
+        return
+    count = get_subscriber_count()
+    db = load_db()
+    recent = sorted(db["users"].values(), key=lambda x: x.get("joined",""), reverse=True)[:5]
+    recent_text = "\n".join([f"• {u['name']} (@{u['username']}) — {u['joined']}" for u in recent])
+    text = (
+        f"🛠 *لوحة الإدارة*\n\n"
+        f"👥 إجمالي المشتركين: *{count}*\n\n"
+        f"🆕 *آخر 5 مشتركين:*\n{recent_text}\n\n"
+        f"📢 للإرسال الجماعي: `/broadcast رسالتك هنا`"
+    )
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+
+async def broadcast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if uid != ADMIN_ID:
+        await update.message.reply_text("⛔ غير مصرح | Unauthorized")
+        return
+    if not context.args:
+        await update.message.reply_text("⚠️ استخدم: `/broadcast رسالتك`", parse_mode="Markdown")
+        return
+    message = " ".join(context.args)
+    subscribers = get_all_subscribers()
+    sent, failed = 0, 0
+    status_msg = await update.message.reply_text(f"📢 جاري الإرسال لـ {len(subscribers)} مشترك...")
+    for sub in subscribers:
+        try:
+            await context.bot.send_message(
+                chat_id=sub["id"],
+                text=f"📢 *إشعار من بوت كأس العالم 2026*\n\n{message}",
+                parse_mode="Markdown"
+            )
+            sent += 1
+            await asyncio.sleep(0.05)
+        except Exception:
+            failed += 1
+    await status_msg.edit_text(f"✅ أُرسل لـ {sent} مشترك\n❌ فشل: {failed}")
 
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -553,128 +693,177 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     uid = query.from_user.id
     data = query.data
-    back_main = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 القائمة الرئيسية | Main Menu", callback_data="back")]])
-
-    # Language
-    if data == "lang_en":
-        user_lang[uid] = "en"
-        await query.edit_message_text("🌐 *Switched to English!*\nChoose what you need 👇", parse_mode="Markdown", reply_markup=main_keyboard("en"))
-        return
-    if data == "lang_ar":
-        user_lang[uid] = "ar"
-        await query.edit_message_text("🌐 *تم التبديل للعربية!*\nاختر ما تريد 👇", parse_mode="Markdown", reply_markup=main_keyboard("ar"))
-        return
-
     lang = get_lang(uid)
 
-    # Today
+    # ── Language switch ──
+    if data == "lang_en":
+        update_user_lang(uid, "en")
+        user_lang[uid] = "en"
+        await query.edit_message_text("🌐 *Switched to English!*\nChoose what you need 👇",
+                                      parse_mode="Markdown", reply_markup=main_keyboard("en"))
+        return
+    if data == "lang_ar":
+        update_user_lang(uid, "ar")
+        user_lang[uid] = "ar"
+        await query.edit_message_text("🌐 *تم التبديل للعربية!*\nاختر ما تريد 👇",
+                                      parse_mode="Markdown", reply_markup=main_keyboard("ar"))
+        return
+
+    # ── Today ──
     if data == "today":
         text = build_matches_text(today_str(), lang)
-        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=back_main)
+        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=back_btn())
 
-    # Tomorrow
+    # ── Tomorrow ──
     elif data == "tomorrow":
         tmr = (date.today() + timedelta(days=1)).strftime("%Y-%m-%d")
         text = build_matches_text(tmr, lang)
-        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=back_main)
+        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=back_btn())
 
-    # Predictions menu
+    # ── Live Matches ──
+    elif data == "live":
+        await query.edit_message_text("🔴 *جاري جلب المباريات المباشرة...*" if lang == "ar" else "🔴 *Fetching live matches...*",
+                                       parse_mode="Markdown")
+        live = await fetch_live_matches()
+        if live:
+            lines = ["🔴 *مباريات الآن | LIVE Now*\n"]
+            for m in live:
+                lines.append(
+                    f"⚡ *{m['home']} {m['home_goal']} — {m['away_goal']} {m['away']}*\n"
+                    f"⏱️ {m['minute']}' | {m['status']}\n🏟️ {m['venue']}\n"
+                )
+            text = "\n".join(lines)
+        else:
+            text = ("🔴 *لا مباريات مباشرة الآن*\n\nراجع جدول المباريات 👇" if lang == "ar"
+                    else "🔴 *No live matches right now*\n\nCheck the schedule below 👇")
+        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=back_btn())
+    # ── Predictions menu ──
     elif data == "predictions":
         title = "🔮 *اختر المباراة للتحليل:*" if lang == "ar" else "🔮 *Choose a match to analyze:*"
-        pred_buttons = [[InlineKeyboardButton(m, callback_data=f"pred_{m}")] for m in PREDICTIONS]
-        pred_buttons.append([InlineKeyboardButton("🔙 رجوع | Back", callback_data="back")])
-        await query.edit_message_text(title, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(pred_buttons))
+        btns = [[InlineKeyboardButton(m, callback_data=f"pred_{i}")] for i, m in enumerate(PREDICTIONS)]
+        btns.append([InlineKeyboardButton("🔙 رجوع | Back", callback_data="back")])
+        await query.edit_message_text(title, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(btns))
 
-    # Single prediction
     elif data.startswith("pred_"):
-        match_name = data[5:]
-        pred = PREDICTIONS.get(match_name, {})
-        text = f"🔮 *{match_name}*\n\n{pred.get(lang, pred.get('ar', '⚠️ غير متاح'))}"
-        back = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع | Back", callback_data="predictions")]])
-        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=back)
+        idx = int(data[5:])
+        keys = list(PREDICTIONS.keys())
+        if idx < len(keys):
+            match_name = keys[idx]
+            pred = PREDICTIONS[match_name]
+            text = f"🔮 *{match_name}*\n\n{pred.get(lang, pred['ar'])}"
+        else:
+            text = "⚠️ غير متاح"
+        await query.edit_message_text(text, parse_mode="Markdown",
+                                       reply_markup=back_btn("predictions"))
 
-    # Groups
+    # ── Tactical Analysis ──
+    elif data == "tactical":
+        title = "🧠 *اختر المنتخب للتحليل التكتيكي:*" if lang == "ar" else "🧠 *Choose a team for tactical analysis:*"
+        teams = list(TACTICAL_ANALYSIS.keys())
+        btns = [[InlineKeyboardButton(t, callback_data=f"tac_{i}")] for i, t in enumerate(teams)]
+        btns.append([InlineKeyboardButton("🔙 رجوع | Back", callback_data="back")])
+        await query.edit_message_text(title, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(btns))
+
+    elif data.startswith("tac_"):
+        idx = int(data[4:])
+        teams = list(TACTICAL_ANALYSIS.keys())
+        if idx < len(teams):
+            team = teams[idx]
+            analysis = TACTICAL_ANALYSIS[team]
+            text = analysis.get(lang, analysis["ar"])
+        else:
+            text = "⚠️ غير متاح"
+        await query.edit_message_text(text, parse_mode="Markdown",
+                                       reply_markup=back_btn("tactical"))
+
+    # ── Groups ──
     elif data == "groups":
         title = "🏆 *مجموعات كأس العالم 2026*\n\n" if lang == "ar" else "🏆 *World Cup 2026 Groups*\n\n"
         text = title
-        for grp, info in GROUPS.items():
+        for grp, teams in GROUPS.items():
             text += f"*━━ Group {grp} ━━*\n"
-            for t in info["teams"]:
+            for t in teams:
                 text += f"  • {t}\n"
             text += "\n"
-        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=back_main)
+        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=back_btn())
 
-    # Stats menu
+    # ── Arab Teams ──
+    elif data == "arab_teams":
+        text = ARAB_TEAMS.get(lang, ARAB_TEAMS["ar"])
+        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=back_btn())
+
+    # ── Stats ──
     elif data == "stats":
         if lang == "ar":
             title = "📊 *اختر نوع الإحصائية:*"
-            buttons = [
-                [InlineKeyboardButton("🏆 أكثر المنتخبات تتويجاً", callback_data="stat_titles")],
-                [InlineKeyboardButton("⚽ أكثر اللاعبين تهديفاً", callback_data="stat_scorers")],
-                [InlineKeyboardButton("📈 إحصائيات 2026", callback_data="stat_wc2026_facts")],
-                [InlineKeyboardButton("🎯 المرشحون للقب", callback_data="stat_favorites")],
+            btns = [
+                [InlineKeyboardButton("🏆 أكثر المنتخبات تتويجاً", callback_data="st_titles")],
+                [InlineKeyboardButton("⚽ هدافو التاريخ", callback_data="st_scorers")],
+                [InlineKeyboardButton("🎯 المرشحون للقب", callback_data="st_favorites")],
+                [InlineKeyboardButton("📈 أرقام 2026", callback_data="st_wc2026")],
                 [InlineKeyboardButton("🔙 رجوع | Back", callback_data="back")],
             ]
         else:
             title = "📊 *Choose a stat category:*"
-            buttons = [
-                [InlineKeyboardButton("🏆 Most Titles", callback_data="stat_titles")],
-                [InlineKeyboardButton("⚽ All-Time Top Scorers", callback_data="stat_scorers")],
-                [InlineKeyboardButton("📈 2026 Key Stats", callback_data="stat_wc2026_facts")],
-                [InlineKeyboardButton("🎯 Title Favorites", callback_data="stat_favorites")],
+            btns = [
+                [InlineKeyboardButton("🏆 Most Titles", callback_data="st_titles")],
+                [InlineKeyboardButton("⚽ All-Time Top Scorers", callback_data="st_scorers")],
+                [InlineKeyboardButton("🎯 Title Favorites", callback_data="st_favorites")],
+                [InlineKeyboardButton("📈 2026 Stats", callback_data="st_wc2026")],
                 [InlineKeyboardButton("🔙 رجوع | Back", callback_data="back")],
             ]
-        await query.edit_message_text(title, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
+        await query.edit_message_text(title, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(btns))
 
-    # Individual stat
-    elif data.startswith("stat_"):
-        key = data[5:]
-        stat = STATS_MENU.get(key, {})
+    elif data.startswith("st_"):
+        key = data[3:]
+        stat = STATS_TEXT.get(key, {})
         text = stat.get(lang, stat.get("ar", "⚠️ غير متاح"))
-        back = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع | Back", callback_data="stats" if key != "arab_teams" else "back")]])
-        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=back)
+        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=back_btn("stats"))
 
-    # Fun fact
+    # ── Fun Fact ──
     elif data == "fact":
         fact = random.choice(FUN_FACTS)
-        back = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🎲 معلومة أخرى | Another", callback_data="fact")],
+        btns = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🎲 أخرى | Another", callback_data="fact")],
             [InlineKeyboardButton("🔙 رجوع | Back", callback_data="back")]
         ])
-        await query.edit_message_text(
-            f"🌟 *هل تعلم؟ | Did You Know?*\n\n{fact}",
-            parse_mode="Markdown", reply_markup=back
-        )
+        await query.edit_message_text(f"🌟 *هل تعلم؟ | Did You Know?*\n\n{fact}",
+                                       parse_mode="Markdown", reply_markup=btns)
 
-    # Back to main
+    # ── Back ──
     elif data == "back":
         name = query.from_user.first_name or "Champion"
         wc_start = date(2026, 6, 11)
-        days_left = (wc_start - date.today()).days
+        days_left = max((wc_start - date.today()).days, 0)
+        total = get_subscriber_count()
         if lang == "ar":
-            text = f"⚽ *القائمة الرئيسية*\n⏳ {days_left} يوم على انطلاق كأس العالم!\n\nاختر ما تريد يا {name} 👇"
+            countdown = f"⏳ {days_left} يوم على الانطلاق!" if days_left > 0 else "🔴 البطولة انطلقت!"
+            text = f"⚽ *القائمة الرئيسية*\n{countdown}\n👥 {total} مشترك\n\nاختر يا {name} 👇"
         else:
-            text = f"⚽ *Main Menu*\n⏳ {days_left} days to World Cup kickoff!\n\nChoose, {name} 👇"
+            countdown = f"⏳ {days_left} days to kickoff!" if days_left > 0 else "🔴 Tournament is LIVE!"
+            text = f"⚽ *Main Menu*\n{countdown}\n👥 {total} subscribers\n\nChoose, {name} 👇"
         await query.edit_message_text(text, parse_mode="Markdown", reply_markup=main_keyboard(lang))
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     lang = get_lang(uid)
-    text = "⚽ استخدم الأزرار للتنقل! أو أرسل /start" if lang == "ar" else "⚽ Use the buttons to navigate! Or send /start"
+    text = "⚽ استخدم الأزرار! أو أرسل /start" if lang == "ar" else "⚽ Use the buttons! Or send /start"
     await update.message.reply_text(text, reply_markup=main_keyboard(lang))
 
 
-# ═══════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════
 #  MAIN
-# ═══════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════
 
 def main():
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("admin", admin_cmd))
+    app.add_handler(CommandHandler("broadcast", broadcast_cmd))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    logger.info("⚽ World Cup 2026 Bot v2.0 is running...")
+    logger.info("⚽ World Cup 2026 Pro Bot v3.0 is running...")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
