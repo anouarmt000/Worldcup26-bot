@@ -83,9 +83,10 @@ TTL_FIXTURES   = 30  * 60        # 30 دقيقة للجدول
 #  API CALL COUNTER (لمراقبة استهلاك الـ API)
 # ═══════════════════════════════════════════════════════
 
-api_calls_today = {"date": today_str() if True else "", "count": 0}
-
 def today_str():
+
+
+api_calls_today = {"date": today_str(), ...}  
     return date.today().strftime("%Y-%m-%d")
 
 def track_api_call():
