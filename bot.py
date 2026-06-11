@@ -945,9 +945,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "Choose your preferred site 👇"
             )
         watch_btns = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🟢 Yalla Shoot يلا شوت", url="https://yallashoot.one")],
-            [InlineKeyboardButton("🔵 Kora Live كورة لايف", url="https://koora-live.tv")],
-            [InlineKeyboardButton("🟣 Kora Star كورة ستار", url="https://koora-star.com")],
+            [InlineKeyboardButton("🟢 Yalla Shoot يلا شوت", url="https://www.yallashots.top/")],
+            [InlineKeyboardButton("🔵 Kora Live كورة لايف", url="https://www.livescorec.com/")],
+            [InlineKeyboardButton("🟣 Kora Star كورة ستار", url="https://www.korastartop.com/")],
             [InlineKeyboardButton("🟡 LiveTV مباشر", url="https://livetv.sx/ar")],
             [InlineKeyboardButton("⚫ Hesgoal هيسغول", url="https://www.hesgoal.tv")],
             [InlineKeyboardButton("🔴 Sport365 سبورت", url="https://sport365.live")],
