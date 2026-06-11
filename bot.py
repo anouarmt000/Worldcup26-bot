@@ -74,8 +74,8 @@ CACHE = SmartCache()
 
 # TTL constants
 TTL_LIVE       = 3   * 60        # 3 دقائق للمباريات الحية
-TTL_STANDINGS  = 6   * 3600      # 6 ساعات للترتيب
-TTL_SCORERS    = 6   * 3600      # 6 ساعات للهدافين
+TTL_STANDINGS  = 3   * 3600      # 6 ساعات للترتيب
+TTL_SCORERS    = 3   * 3600      # 6 ساعات للهدافين
 TTL_RESULTS    = 5   * 60        # 5 دقائق للنتائج
 TTL_FIXTURES   = 30  * 60        # 30 دقيقة للجدول
 
