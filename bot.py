@@ -948,9 +948,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("🟢 Yalla Shoot يلا شوت", url="https://www.google.com/search?q=موقع+يلا+شوت+رسمي")],
             [InlineKeyboardButton("🔵 Kora Live كورة لايف", url="https://www.google.com/search?q=موقع+كورة+لايف+المباشر")],
             [InlineKeyboardButton("🟣 Kora Star كورة ستار", url="https://www.google.com/search?q=موقع+كورة+ستار+مباشر+الان")],
-            [InlineKeyboardButton("🟡 LiveTV مباشر", url="https://livetv.sx/ar")],
-            [InlineKeyboardButton("⚫ Hesgoal هيسغول", url="https://www.hesgoal.tv")],
-            [InlineKeyboardButton("🔴 Sport365 سبورت", url="https://sport365.live")],
+            [InlineKeyboardButton("🟡 LiveTV مباشر", url="https://www.google.com/search?q=LiveTV+official+streaming+site")],
+            [InlineKeyboardButton("⚫ Hesgoal هيسغول", url="https://www.google.com/search?q=Hesgoal+live+football+stream")],
+            [InlineKeyboardButton("🔴 Sport365 سبورت", url="https://www.google.com/search?q=Sport365+live+matches")],
             [InlineKeyboardButton("🔙 رجوع | Back", callback_data="back")],
         ])
         await query.edit_message_text(title, parse_mode="Markdown", reply_markup=watch_btns)
