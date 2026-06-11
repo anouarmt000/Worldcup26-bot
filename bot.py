@@ -478,7 +478,6 @@ PREDICTIONS = {
         "ar": "🔮 *الأرجنتين vs الجزائر*\n🏟️ Kansas City Stadium\n🕐 01:00 GMT — 17 يونيو\n📊 *التوقع:* 2-1 للأرجنتين\n\n💪 الأرجنتين: ميسي + ألفاريز جائعان للدفاع عن اللقب\n⚠️ الجزائر: محرز + دفاع متماسك + صدمة ممكنة!\n🎯 مباراة صعبة — الأرجنتين بهدف الفارق",
         "en": "🔮 *Argentina vs Algeria*\n🏟️ Kansas City Stadium\n🕐 01:00 GMT — June 17\n📊 *Prediction:* Argentina 2-1\n\n💪 Argentina: defending champions, Messi + Alvarez\n⚠️ Algeria: Mahrez + organized defense — upset possible!\n🎯 Tough match — Argentina by one goal",
     },
-    },
     "🇩🇿 Algeria vs 🇦🇹 Austria": {
         "ar": "🔮 *الجزائر vs النمسا*\n🏟️ Allegiant Stadium, Las Vegas\n📊 *التوقع:* تعادل 1-1\n\n💪 الجزائر: محرز + مازا + أمورا\n⚠️ النمسا: منتخب أوروبي منظم\n🎯 مباراة متكافئة!",
         "en": "🔮 *Algeria vs Austria*\n🏟️ Allegiant Stadium\n📊 *Prediction:* Draw 1-1\n\n💪 Algeria: Mahrez + Maza + Amoura\n⚠️ Austria: organized European side\n🎯 Balanced clash — Algeria can win!",
