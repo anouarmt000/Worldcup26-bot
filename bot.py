@@ -796,10 +796,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         watch_btns = InlineKeyboardMarkup([
             [InlineKeyboardButton("🟢 يلا شوت | Yalla Shoot", url="https://yalla-shooted.mov")],
-            [InlineKeyboardButton("🔵 LiveTV مباشر", url="https://livetv.sx/ar")],
-            [InlineKeyboardButton("🟣 كورة ستار | Kora Star", url="https://koora-online.live")],
+            [InlineKeyboardButton("🔵 LiveTV مباشر", url="https://www.google.com/search?q=LiveTV+official+streaming+site")],
+            [InlineKeyboardButton("🟣 كورة ستار | Kora Star", url="https://www.google.com/search?q=موقع+كورة+ستار+مباشر+الان")],
             [InlineKeyboardButton("🟡 بين سبورت | beIN Sport", url="https://www.beinsports.com/ar")],
-            [InlineKeyboardButton("⚫ Sport365", url="https://sport365.live")],
+            [InlineKeyboardButton("⚫ Sport365", url="https://www.google.com/search?q=Sport365+live+matches")],
             [InlineKeyboardButton("🔙 رجوع | Back", callback_data="back")],
         ])
         await query.edit_message_text(title, parse_mode="Markdown", reply_markup=watch_btns)
