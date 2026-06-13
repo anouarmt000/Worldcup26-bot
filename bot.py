@@ -199,7 +199,7 @@ MATCHES_BY_DATE = {
 # ═══════════════════════════════════════════════════════
 
 SIM_TEAMS = [
-    {"flag":"🇲🇦","ar":"المغرب","en":"Morocco","p_ar":["حكيمي","إبراهيم دياز","النصيري","أمرابط"],"p_en":["Hakimi","Díaz","En-Nesyri","Amrabat"]},
+    {"flag":"🇲🇦","ar":"المغرب","en":"Morocco","p_ar":["حكيمي","إبراهيم دياز","ياسين بونو","أمرابط"],"p_en":["Hakimi","Díaz","yassin bono","Amrabat"]},
     {"flag":"🇦🇷","ar":"الأرجنتين","en":"Argentina","p_ar":["ميسي","خوليان ألفاريز","ماك أليستر","دي باول"],"p_en":["Messi","Julián Álvarez","Mac Allister","De Paul"]},
     {"flag":"🇧🇷","ar":"البرازيل","en":"Brazil","p_ar":["فينيسيوس","رودريغو","أندريك","رافينيا"],"p_en":["Vinícius","Rodrygo","Endrick","Raphinha"]},
     {"flag":"🇫🇷","ar":"فرنسا","en":"France","p_ar":["مبابي","جريزمان","تشواميني","ديمبيلي"],"p_en":["Mbappé","Griezmann","Tchouaméni","Dembélé"]},
